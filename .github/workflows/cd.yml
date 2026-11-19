@@ -1,0 +1,137 @@
+name: CD
+
+# Publishes the image to Docker Hub after CI passes on a push to main, then
+# asks the deployment hook in the DEPLOY_URL secret, when there is one, to
+# deploy it.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+# Queue runs rather than cancel them: every run publishes main's tip (see
+# "Resolve main's tip"), so a queued run that replaces another loses nothing.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  docker-push:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      sha: ${{ steps.tip.outputs.sha }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      # CI runs for successive pushes can finish out of order, and the run
+      # that triggered this one may be for a commit main has moved past, so
+      # build main's tip instead, and only once CI has passed for it.
+      # Otherwise do nothing: the tip's own CI run triggers CD again.
+      - name: Resolve main's tip
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          passed=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&event=push&status=success" --jq .total_count)
+          if [ "$passed" -gt 0 ]; then
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            echo "short=${sha:0:7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "CI has not passed for main's tip $sha yet; its own CI run will publish it."
+          fi
+
+      - if: steps.tip.outputs.sha != ''
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ steps.tip.outputs.sha }}
+          persist-credentials: false
+
+      - if: steps.tip.outputs.sha != ''
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - if: steps.tip.outputs.sha != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - if: steps.tip.outputs.sha != ''
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_HUB_USERNAME }}/acme:latest
+            ${{ secrets.DOCKER_HUB_USERNAME }}/acme:sha-${{ steps.tip.outputs.short }}
+
+      # The digest is what a deployment that pins the image pins.
+      - if: steps.tip.outputs.sha != ''
+        name: Record the digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          SHORT: ${{ steps.tip.outputs.short }}
+        run: |
+          echo "sha-$SHORT is $DIGEST"
+          {
+            echo "### Published sha-$SHORT"
+            echo
+            echo "Digest: \`$DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Runs only once this run has published main's tip.
+  deploy:
+    needs: docker-push
+    if: needs.docker-push.outputs.sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # The deploy hook answers when the deploy ends, 409 while another is in
+      # flight, and within 660 seconds.
+      # A refused or cut connection (000), 409, 502 and 504 are retried a
+      # minute apart, up to 10 tries; any other answer fails the job. A curl
+      # timeout isn't retried: by then the hook has given up on the deploy.
+      - name: Trigger deploy
+        env:
+          DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
+          DEPLOY_SECRET: ${{ secrets.DEPLOY_SECRET }}
+          SHA: ${{ needs.docker-push.outputs.sha }}
+          DIGEST: ${{ needs.docker-push.outputs.digest }}
+        run: |
+          if [ -z "$DEPLOY_URL" ]; then
+            echo "No DEPLOY_URL secret: published only."
+            exit 0
+          fi
+          # The hook deploys this digest, so it must name what this run pushed.
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::the push gave no image digest to deploy"
+            exit 1
+          fi
+          # Only the status is printed: the URL and the response stay out of public logs.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            rc=0
+            out=$(curl -s -o /dev/null --max-time 660 -w '%{http_code} %{time_total}' -X POST "$DEPLOY_URL" \
+              -H "Authorization: Bearer $DEPLOY_SECRET" \
+              -H "Content-Type: application/json" \
+              --data "{\"sha\":\"${SHA}\",\"digest\":\"${DIGEST}\",\"repo\":\"${GITHUB_REPOSITORY}\"}") || rc=$?
+            status=${out%% *}
+            case $rc in
+              0) ;;
+              7|18|52|56|92) status=000 ;;
+              *) echo "attempt $attempt: curl exited $rc after ${out#* }s"; exit 1 ;;
+            esac
+            echo "attempt $attempt: deploy hook answered $status after ${out#* }s"
+            case "$status" in
+              2??) exit 0 ;;
+              000|409|502|504) [ "$attempt" = 10 ] || sleep 60 ;;
+              *) exit 1 ;;
+            esac
+          done
+          exit 1

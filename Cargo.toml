@@ -1,0 +1,31 @@
+[package]
+name = "acme"
+version = "0.1.0"
+edition = "2024"
+description = "Renews the certificates in a certbot configuration directory, in place, in a few megabytes of memory"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["hyper-rustls", "ring", "time", "x509-parser"] }
+libc = "0.2"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rsa = { version = "0.9", features = ["getrandom"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+serde_json = "1"
+time = "0.3"
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+webpki-roots = "1"
+x509-parser = "0.18"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

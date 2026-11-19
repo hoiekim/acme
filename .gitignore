@@ -1,0 +1,10 @@
+/target
+
+# OS
+.DS_Store
+
+# Tool-specific agent files
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+.claude/

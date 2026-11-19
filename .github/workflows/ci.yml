@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Only cancel superseded PR pushes: a cancelled push-to-main run leaves a
+  # merged commit without a green check, and CD publishes only green ones.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      # Installs the toolchain rust-toolchain.toml pins.
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Check the scripts
+        run: shellcheck -x -P SCRIPTDIR ci/*.sh
+
+  # Builds the production image without pushing it and runs it end to end
+  # (ci/e2e.sh): against Pebble and nginx, beside certbot, under a 16 MiB
+  # memory limit. A change that breaks renewal, certbot's layout or the
+  # memory budget fails the PR instead of CD after merge.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build --tag acme:ci .
+
+      # FROM scratch has no libc to load, so the binary must be static.
+      - name: Check the binary is static
+        run: |
+          id=$(docker create acme:ci)
+          docker cp "$id:/acme" "$RUNNER_TEMP/acme"
+          docker rm "$id" >/dev/null
+          file "$RUNNER_TEMP/acme" | tee /dev/stderr | grep -q 'static'
+          echo "image size: $(docker image inspect acme:ci --format '{{.Size}}') bytes"
+
+      - name: End to end
+        env:
+          IMAGE: acme:ci
+        run: ci/e2e.sh
