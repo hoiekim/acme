@@ -93,7 +93,10 @@ struct IssueArgs {
 }
 
 fn parse_interval(value: &str) -> Result<Duration, String> {
-    let (number, unit) = value.split_at(value.len().saturating_sub(1));
+    let (number, unit) = match value.char_indices().next_back() {
+        Some((at, _)) => value.split_at(at),
+        None => return Err("an empty interval".to_owned()),
+    };
     let number: u64 = number
         .parse()
         .map_err(|_| format!("{value:?} is not like 30s, 10m, 12h or 1d"))?;
@@ -271,6 +274,13 @@ mod tests {
         assert_eq!(parse_interval("1d").unwrap(), Duration::from_secs(86_400));
         assert!(parse_interval("12").is_err());
         assert!(parse_interval("h").is_err());
+    }
+
+    #[test]
+    fn an_interval_ending_in_a_multibyte_character_is_a_usage_error() {
+        for value in ["12é", "é", "1日"] {
+            assert!(parse_interval(value).is_err(), "{value}");
+        }
     }
 
     #[test]

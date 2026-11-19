@@ -15,6 +15,7 @@ use std::io::Write;
 use std::ops::Bound;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
@@ -472,7 +473,10 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
 /// write at the same time.
 pub struct Lock(#[allow(dead_code)] File);
 
-pub fn lock(config_dir: &Path) -> Result<Lock> {
+/// Takes `<config>/acme/lock`, waiting up to `wait` for another acme process
+/// to let go of it, and fails after that, so a stuck holder can't stall the
+/// caller with no error.
+pub async fn lock(config_dir: &Path, wait: Duration) -> Result<Lock> {
     use std::os::fd::AsRawFd;
     let dir = config_dir.join("acme");
     fs::create_dir_all(&dir)?;
@@ -483,6 +487,8 @@ pub fn lock(config_dir: &Path) -> Result<Lock> {
         .write(true)
         .mode(0o600)
         .open(dir.join("lock"))?;
+    let deadline = Instant::now() + wait;
+    let mut waiting = false;
     loop {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(Lock(file));
@@ -491,10 +497,16 @@ pub fn lock(config_dir: &Path) -> Result<Lock> {
         if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
             return Err(err).context("locking acme/lock");
         }
-        info!("waiting for another acme process to finish");
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            return Ok(Lock(file));
+        ensure!(
+            Instant::now() < deadline,
+            "another acme process has held acme/lock for {}s",
+            wait.as_secs()
+        );
+        if !waiting {
+            info!("waiting up to {}s for another acme process to finish", wait.as_secs());
+            waiting = true;
         }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -685,6 +697,18 @@ mod tests {
             !root.join("archive/last/cert0.pem").exists(),
             "save wrapped to version 0"
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn links_at_different_versions_are_refused() {
+        let root = temp_dir("mixed-versions");
+        let lineage = certbot_lineage(&root, "mixed");
+        fs::write(root.join("archive/mixed/cert2.pem"), "cert 2\n").unwrap();
+        fs::remove_file(root.join("live/mixed/cert.pem")).unwrap();
+        symlink("../../archive/mixed/cert2.pem", root.join("live/mixed/cert.pem")).unwrap();
+        let err = lineage.current_version().unwrap_err().to_string();
+        assert!(err.contains("different versions"), "{err}");
         fs::remove_dir_all(&root).unwrap();
     }
 

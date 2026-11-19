@@ -121,6 +121,13 @@ before=$(state)
 if acme renew --force; then fail "renew succeeded without a server"; fi
 [ "$(state)" = "$before" ] || { diff <(echo "$before") <(state) || true; fail "a failed renewal changed files"; }
 pass "renew exits 1 and changes nothing"
+# Nothing is due for ecdsa, so its renewal information can't be fetched and
+# the pass decides from the certificate's lifetime instead.
+code=0
+acme renew --cert-name ecdsa || code=$?
+[ "$code" = 0 ] || fail "a pass with nothing due exited $code without a server"
+[ "$(state)" = "$before" ] || fail "a pass with nothing due changed files"
+pass "a pass with nothing due exits 0 and changes nothing"
 start=$(date +%s)
 code=0
 acme run --force --interval 5s >"$WORK/run.log" 2>&1 || code=$?
@@ -143,6 +150,33 @@ grep -q 'rsa: renewal failed' "$WORK/challenge.log" || fail "the failure isn't r
 [ -z "$(leftovers)" ] || fail "left behind: $(leftovers)"
 pass "the failed one is untouched, the others renewed, and the pass exits 1"
 sudo cp "$WORK/rsa.conf" "$LE/renewal/rsa.conf"
+
+echo "== certbot's hook directories and cli.ini fail every pass, and change nothing"
+sudo mkdir -p "$LE/renewal-hooks/deploy"
+printf '#!/bin/sh\nexit 0\n' | sudo tee "$LE/renewal-hooks/deploy/reload" >/dev/null
+sudo chmod 0755 "$LE/renewal-hooks/deploy/reload"
+before=$(state)
+for args in "renew --force" "renew"; do
+  code=0
+  # shellcheck disable=SC2086
+  acme $args >"$WORK/hook.log" 2>&1 || code=$?
+  [ "$code" = 1 ] || { cat "$WORK/hook.log"; fail "acme $args exited $code with a deploy hook in place"; }
+  grep 'renewal-hooks/deploy/reload is a hook certbot would run' "$WORK/hook.log" >/dev/null ||
+    { cat "$WORK/hook.log"; fail "acme $args didn't name the hook"; }
+  [ "$(state)" = "$before" ] || fail "acme $args changed files with a deploy hook in place"
+done
+sudo rm "$LE/renewal-hooks/deploy/reload"
+pass "a deploy hook fails forced and unforced passes, which change nothing"
+printf 'deploy-hook = nginx -s reload\n' | sudo tee "$LE/cli.ini" >/dev/null
+before=$(state)
+code=0
+acme renew >"$WORK/cli-ini.log" 2>&1 || code=$?
+[ "$code" = 1 ] || { cat "$WORK/cli-ini.log"; fail "renew exited $code with a deploy-hook in cli.ini"; }
+grep 'cli.ini sets deploy-hook' "$WORK/cli-ini.log" >/dev/null ||
+  { cat "$WORK/cli-ini.log"; fail "renew didn't name the cli.ini setting"; }
+[ "$(state)" = "$before" ] || fail "renew changed files with a deploy-hook in cli.ini"
+sudo rm "$LE/cli.ini"
+pass "a cli.ini deploy-hook fails the pass, which changes nothing"
 
 echo "== docker stop ends a run straight away"
 docker run -d --name acme-run --network "$NET" --memory "$ACME_MEMORY" --memory-swap "$ACME_MEMORY" \

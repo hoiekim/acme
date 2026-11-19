@@ -27,6 +27,10 @@ compiled in.
   (`ecdsa` or `rsa`), `--elliptic-curve` and `--rsa-key-size` as in certbot.
 - **`list`**: the certificate names under `live/`, one per line.
 
+Each renewal, and each `issue`, gives up after 5 minutes. A pass or an
+`issue` waits at most 10 minutes for another acme process to release
+`acme/lock`, then fails.
+
 Every command takes `--config-dir` (`/etc/letsencrypt`), `--ca-cert` (a PEM
 file of extra roots to trust, for a test ACME server) and `--log-file`, or
 the environment variables `ACME_CONFIG_DIR`, `ACME_CA_CERT` and
@@ -52,6 +56,20 @@ up long before the certificate expires: an authenticator other than webroot,
 an installer, a pre, post, renew or deploy hook, `reuse_key` and
 `must_staple`. `preferred_chain` is ignored, and the CA's default chain is
 used.
+
+certbot also acts on two things beside the renewal files, and while either
+is there every certificate fails on every pass:
+
+- an executable in `renewal-hooks/pre/`, `deploy/` or `post/`, other than
+  one whose name ends in `~`, which certbot would run around a renewal;
+- a `cli.ini` setting other than those that only change logging,
+  registration or prompts: `agree-tos`, `email`, `eff-email`,
+  `no-eff-email`, `register-unsafely-without-email`, `non-interactive` (or
+  `noninteractive`), `text`, `quiet`, `verbose`, `max-log-backups`,
+  `logs-dir`, `work-dir`, `no-random-sleep-on-renew` and `user-agent`.
+  `directory-hooks` and `no-directory-hooks` are accepted too: turning
+  directory hooks off turns the hook check off, as it turns the hooks off
+  for certbot.
 
 ## When it renews
 
